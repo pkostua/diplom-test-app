@@ -8,24 +8,15 @@
 
 ### 1. Секреты для Docker Registry
 
-- `REGISTRY_URL` - URL вашего Docker registry (например: `cr.yandex\{registry_id}`)
-- `REGISTRY_PASSWORD` - токен для аутентификации
+- `REGISTRY_URL` — адрес реестра (например: `cr.yandex/<registry_id>`)
+- `YC_OAUTH_TOKEN` — токен (используется как пароль при логине в реестр с пользователем `oauth`)
 
-### 2. Секрет для Kubernetes
+### 2. Секреты для доступа к Yandex Managed Kubernetes
 
-- `KUBE_CONFIG` — содержимое kubeconfig в обычном текстовом виде (plaintext)
-
-Как получить kubeconfig:
-
-```bash
-# Для текущего контекста (minikube, kind, k3d и т.д.)
-kubectl config view --raw > kubeconfig.yaml
-
-# Для удаленного файла kubeconfig
-kubectl config view --raw --kubeconfig=/path/to/kubeconfig > kubeconfig.yaml
-
-# Содержимое kubeconfig.yaml скопируйте в секрет `KUBE_CONFIG`
-```
+- `YC_OAUTH_TOKEN` — OAuth-токен сервисного/пользовательского аккаунта в Yandex Cloud
+- `YC_CLOUD_ID` — ID облака
+- `YC_FOLDER_ID` — ID каталога
+- `YC_CLUSTER_ID` — ID кластера Managed Kubernetes
 
 ## Структура проекта
 
@@ -37,6 +28,10 @@ kubectl config view --raw --kubeconfig=/path/to/kubeconfig > kubeconfig.yaml
 ## Kubernetes Deployment
 
 Workflow автоматически обновляет deployment с именем `test-app`. Убедитесь, что в вашем кластере существует deployment с таким именем.
+
+Примечания:
+- Аутентификация и получение kubeconfig выполняются командой `yc managed-kubernetes cluster get-credentials --id <CLUSTER_ID> --external`.
+- Для логина в реестр используется `username: oauth` и `password: YC_OAUTH_TOKEN`.
 
 
 ## Триггеры workflow

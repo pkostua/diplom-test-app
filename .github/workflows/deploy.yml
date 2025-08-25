@@ -11,7 +11,10 @@ on:
 env:
   REGISTRY: ${{ secrets.REGISTRY_URL }}
   IMAGE_NAME: test-app
-  KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+  YC_OAUTH_TOKEN: ${{ secrets.YC_OAUTH_TOKEN }}
+  YC_CLOUD_ID: ${{ secrets.YC_CLOUD_ID }}
+  YC_FOLDER_ID: ${{ secrets.YC_FOLDER_ID }}
+  YC_CLUSTER_ID: ${{ secrets.YC_CLUSTER_ID }}
 
 jobs:
   build:
@@ -31,7 +34,7 @@ jobs:
       with:
         registry: ${{ env.REGISTRY }}
         username: oauth
-        password: ${{ secrets.REGISTRY_PASSWORD }}
+        password: ${{ secrets.YC_OAUTH_TOKEN }}
         
     - name: Extract metadata
       id: meta
@@ -69,16 +72,67 @@ jobs:
       uses: azure/setup-kubectl@v3
       with:
         version: 'latest'
-        
-    - name: Configure kubectl
+    
+    - name: Install Yandex Cloud CLI
+      if: env.YC_OAUTH_TOKEN != ''
+      shell: bash
       run: |
-        # Write plaintext kubeconfig from secret
-        echo "${{ env.KUBE_CONFIG }}" > kubeconfig.yaml
-        export KUBECONFIG=kubeconfig.yaml
+        curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -a
+        echo "$HOME/yandex-cloud/bin" >> $GITHUB_PATH
+
+    - name: Authenticate YC with OAuth token and fetch kubeconfig
+      if: env.YC_SA_KEY_JSON == '' && env.YC_OAUTH_TOKEN != ''
+      shell: bash
+      run: |
+        yc config profile create gha
+        yc config set token "${{ env.YC_OAUTH_TOKEN }}"
+        yc config set cloud-id "${{ env.YC_CLOUD_ID }}"
+        yc config set folder-id "${{ env.YC_FOLDER_ID }}"
+        yc managed-kubernetes cluster get-credentials --id "${{ env.YC_CLUSTER_ID }}" --external
+    
+
+    - name: Ensure Kubernetes API server uses port 6443
+      shell: bash
+      run: |
+        # Decide which kubeconfig file to edit
+        if [ -f kubeconfig.yaml ]; then
+          export KUBECONFIG=kubeconfig.yaml
+          CFG=kubeconfig.yaml
+        else
+          mkdir -p "$HOME/.kube"
+          CFG="$HOME/.kube/config"
+          export KUBECONFIG="$CFG"
+        fi
+        # Pick first cluster name from kubeconfig
+        CLUSTER_NAME=$(kubectl config get-clusters | tail -n +2 | head -n 1)
+        if [ -z "$CLUSTER_NAME" ]; then
+          echo "No clusters found in kubeconfig" >&2
+          exit 1
+        fi
+        # Determine desired server URL from current kubeconfig
+        CURRENT_SERVER=$(kubectl config view -o jsonpath='{.clusters[?(@.name=="'"$CLUSTER_NAME"'")].cluster.server}')
+        # If CURRENT_SERVER has no explicit port, append :6443
+        # Preserve scheme and host; handle potential path parts
+        if echo "$CURRENT_SERVER" | grep -Eq '^https?://[^/]+(:[0-9]+)?(/.*)?$'; then
+          SCHEME_HOST=$(echo "$CURRENT_SERVER" | sed -E 's#^(https?://[^/:/]+)(:([0-9]+))?(.*)$#\1#')
+          HAS_PORT=$(echo "$CURRENT_SERVER" | sed -nE 's#^https?://[^/:/]+:([0-9]+).*$#\1#p')
+          REST_PATH=$(echo "$CURRENT_SERVER" | sed -E 's#^(https?://[^/]+)(/.*)?$#\2#')
+          if [ -z "$HAS_PORT" ]; then
+            SERVER_TARGET="${SCHEME_HOST}:6443${REST_PATH}"
+          else
+            SERVER_TARGET="$CURRENT_SERVER"
+          fi
+        else
+          # Fallback: if format unexpected, just leave as is
+          SERVER_TARGET="$CURRENT_SERVER"
+        fi
+        echo "Using API server: $SERVER_TARGET"
+        kubectl config set-cluster "$CLUSTER_NAME" --server="$SERVER_TARGET" --kubeconfig="$CFG"
         
     - name: Update Kubernetes deployment
       run: |
-        export KUBECONFIG=kubeconfig.yaml
+        # Use default kubeconfig from YC step; fallback to local file if present
+        if [ -f kubeconfig.yaml ]; then export KUBECONFIG=kubeconfig.yaml; fi
         
         # Get the image tag from the build job
         IMAGE_TAG="${{ needs.build.outputs.image-tag }}"
@@ -108,4 +162,4 @@ jobs:
     - name: Cleanup
       if: always()
       run: |
-        rm -f kubeconfig.yaml
+        rm -f kubeconfig.yaml || true
