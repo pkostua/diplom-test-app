@@ -65,6 +65,7 @@ metadata:
   annotations:
 
 spec:
+  ingressClassName: nginx
   rules:
     - host: test-app.pkdp.ru
       http:
