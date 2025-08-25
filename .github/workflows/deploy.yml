@@ -1,0 +1,113 @@
+name: Build and Deploy to Kubernetes
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ${{ secrets.REGISTRY_URL }}
+  IMAGE_NAME: test-app
+  KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.version }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: oauth
+        password: ${{ secrets.REGISTRY_PASSWORD }}
+        
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+          type=raw,value=${{ github.run_number }}-${{ github.sha }}
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+        
+    - name: Configure kubectl
+      run: |
+        # Write plaintext kubeconfig from secret
+        echo "${{ env.KUBE_CONFIG }}" > kubeconfig.yaml
+        export KUBECONFIG=kubeconfig.yaml
+        
+    - name: Update Kubernetes deployment
+      run: |
+        export KUBECONFIG=kubeconfig.yaml
+        
+        # Get the image tag from the build job
+        IMAGE_TAG="${{ needs.build.outputs.image-tag }}"
+        if [ -z "$IMAGE_TAG" ]; then
+          # Fallback to tag name if version is not available
+          IMAGE_TAG="${GITHUB_REF#refs/tags/}"
+        fi
+        
+        LATEST_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$IMAGE_TAG"
+        
+        echo "Deploying image: $LATEST_IMAGE"
+        
+        # Update the deployment with new image tag
+        kubectl set image deployment/test-app test-app=$LATEST_IMAGE
+        
+        # Add timestamp annotation to force restart if image is the same
+        kubectl patch deployment test-app -p '{"spec":{"template":{"metadata":{"annotations":{"date":"'$(date +%s)'"}}}}}'
+        
+        # Wait for rollout to complete
+        kubectl rollout status deployment/test-app --timeout=300s
+        
+        # Verify the deployment
+        kubectl get pods -l app=test-app
+        
+        echo "Successfully deployed $IMAGE_TAG to Kubernetes cluster"
+        
+    - name: Cleanup
+      if: always()
+      run: |
+        rm -f kubeconfig.yaml
